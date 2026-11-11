@@ -1,0 +1,95 @@
+rules_version = '2';
+
+// The backend (backend/) no longer has a service account — it calls this
+// Firestore over the public REST API using each caller's own Firebase ID
+// token (see backend/src/lib/firestoreRest.js). These rules are therefore
+// the *real* access-control boundary, not the Node backend: anyone with a
+// valid ID token can call Firestore directly, bypassing the backend
+// entirely, so every check the backend used to do in code has to also hold
+// here.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Keep in sync with backend/.env's ADMIN_EMAILS.
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.email in ['admin@unify.com'];
+    }
+
+    function onlyChanged(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    match /users/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      // isAdmin can only be set to what the caller's own verified email
+      // entitles them to — a user can't grant themselves admin by writing
+      // isAdmin:true directly.
+      allow create: if isSignedIn() && request.auth.uid == uid
+        && request.resource.data.isAdmin == isAdmin();
+      allow update, delete: if false; // no update route exists today
+    }
+
+    match /opportunities/{id} {
+      allow read: if true;
+      allow create: if isAdmin(); // seed-only in the current app
+      allow update: if isSignedIn() && onlyChanged(['saved']);
+      allow delete: if false;
+    }
+
+    match /applications/{id} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isSignedIn();
+      allow delete: if false;
+    }
+
+    match /supplyChainRequests/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /collaborations/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /governmentContracts/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /governmentTenders/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /notifications/{id} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && onlyChanged(['read']);
+      allow delete: if false;
+    }
+
+    // Single shared company profile document (matches the app's
+    // single-tenant design — any signed-in user can view/edit it).
+    match /profile/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /conversations/{id} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin(); // seed-only in the current app
+      allow update: if isSignedIn() && onlyChanged(['lastMessage', 'lastMessageAt', 'unreadCount']);
+
+      match /messages/{msgId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn();
+      }
+    }
+  }
+}
